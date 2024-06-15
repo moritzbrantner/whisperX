@@ -213,8 +213,16 @@ class WriteTXT(ResultWriter):
     extension: str = "txt"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
+        last_speaker = ""
         for segment in result["segments"]:
-            print(segment["text"].strip(), file=file, flush=True)
+            if "speaker" in segment:
+                if last_speaker != segment["speaker"]:
+                    print(f"[{segment['speaker']}]: {segment['text']}", file=file, flush=True)
+                    last_speaker = segment["speaker"]
+                else:
+                    print(f"{' ' * (len(segment['speaker']) + 4)} {segment['text']}", file=file, flush=True)
+            else:
+                print(segment["text"].strip(), file=file, flush=True)
 
 
 class SubtitlesWriter(ResultWriter):
