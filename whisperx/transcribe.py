@@ -1,4 +1,4 @@
-import argparse
+import configargparse as argparse
 import gc
 import os
 import warnings
@@ -16,7 +16,9 @@ from .utils import (LANGUAGES, TO_LANGUAGE_CODE, get_writer, optional_float,
 
 def cli():
     # fmt: off
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter, 
+        default_config_files=['./whisperx.conf','~/whisperx.conf'])
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
     parser.add_argument("--model", default="small", help="name of the Whisper model to use")
     parser.add_argument("--model_dir", type=str, default=None, help="the path to save model files; uses ~/.cache/whisper by default")
@@ -219,8 +221,8 @@ def cli():
         diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
         for result, input_audio_path in tmp_results:
             diarize_segments = diarize_model(input_audio_path, min_speakers=min_speakers, max_speakers=max_speakers)
-            result = assign_word_speakers(diarize_segments, result)
-            results.append((result, input_audio_path))
+            diarize_result = assign_word_speakers(diarize_segments, result)
+            results.append((diarize_result, input_audio_path))
     # >> Write
     for result, audio_path in results:
         result["language"] = align_language
