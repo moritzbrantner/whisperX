@@ -178,6 +178,7 @@ def cli():
         result = model.transcribe(audio, batch_size=batch_size, chunk_size=chunk_size, print_progress=print_progress)
         results.append((result, audio_path))
 
+
     # Unload Whisper and VAD
     del model
     gc.collect()
@@ -203,7 +204,8 @@ def cli():
                     align_model, align_metadata = load_align_model(result["language"], device)
                 print(">>Performing alignment...")
                 result = align(result["segments"], align_model, align_metadata, input_audio, device, interpolate_method=interpolate_method, return_char_alignments=return_char_alignments, print_progress=print_progress)
-
+                result["align_model"] = align_metadata["model_name"]
+                    
             results.append((result, audio_path))
 
         # Unload align model
@@ -222,10 +224,12 @@ def cli():
         for result, input_audio_path in tmp_results:
             diarize_segments = diarize_model(input_audio_path, min_speakers=min_speakers, max_speakers=max_speakers)
             diarize_result = assign_word_speakers(diarize_segments, result)
+            diarize_result["diarize_model"] = diarize_model.model_name
             results.append((diarize_result, input_audio_path))
     # >> Write
     for result, audio_path in results:
         result["language"] = align_language
+        result["model"] = model_name
         writer(result, audio_path, writer_args)
 
 if __name__ == "__main__":
