@@ -217,10 +217,10 @@ class WriteTXT(ResultWriter):
         for segment in result["segments"]:
             if "speaker" in segment:
                 if last_speaker != segment["speaker"]:
-                    print(f"[{segment['speaker']}]: {segment['text']}", file=file, flush=True)
+                    print(f"[{segment['speaker']}]: {segment['text'].strip()}", file=file, flush=True)
                     last_speaker = segment["speaker"]
                 else:
-                    print(f"{' ' * (len(segment['speaker']) + 4)} {segment['text']}", file=file, flush=True)
+                    print(f"{' ' * (len(segment['speaker']) + 3)} {segment['text'].strip()}", file=file, flush=True)
             else:
                 print(segment["text"].strip(), file=file, flush=True)
 
@@ -400,7 +400,7 @@ class WriteAudacity(ResultWriter):
         for segment in result["segments"]:
             print(segment["start"], file=file, end=ARROW)
             print(segment["end"], file=file, end=ARROW)
-            print( ( ("[[" + segment["speaker"] + "]]") if "speaker" in segment else "") + segment["text"].strip().replace("\t", " "), file=file, flush=True)
+            print( ( ("[[" + segment["speaker"] + "]]") if "speaker" in segment else "") + segment["text"].replace("\t", " "), file=file, flush=True)
 
             
 
@@ -408,7 +408,7 @@ class WriteJSON(ResultWriter):
     extension: str = "json"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
-        json.dump(result, file, ensure_ascii=False)
+        json.dump(result, file, ensure_ascii=False, indent=2)
 
 
 def get_writer(

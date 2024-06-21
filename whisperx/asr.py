@@ -225,7 +225,7 @@ class FasterWhisperPipeline(Pipeline):
                 text = text[0]
             segments.append(
                 {
-                    "text": text,
+                    "text": text.strip(),
                     "start": round(vad_segments[idx]['start'], 3),
                     "end": round(vad_segments[idx]['end'], 3)
                 }
