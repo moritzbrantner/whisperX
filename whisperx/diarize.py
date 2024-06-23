@@ -46,8 +46,9 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
             dia_tmp = diarize_df
         if len(dia_tmp) > 0:
             # sum over speakers
-            speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
-            seg["speaker"] = speaker
+            speaker_values = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False)
+            seg["speaker"] = speaker_values.index[0] # most common speaker
+            seg["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()     
         
         # assign speaker to words
         if 'words' in seg:
@@ -62,8 +63,9 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
                         dia_tmp = diarize_df
                     if len(dia_tmp) > 0:
                         # sum over speakers
-                        speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
-                        word["speaker"] = speaker
+                        speaker_values = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False)
+                        word["speaker"] = speaker_values.index[0] # most common speaker
+                        word["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()
     
     return transcript_result            
 
