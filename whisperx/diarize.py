@@ -35,6 +35,11 @@ class DiarizationPipeline:
 
 def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
     transcript_segments = transcript_result["segments"]
+    # create array for speakers
+    speakers = {}
+    for speaker in diarize_df["speaker"].unique():
+        speakers[speaker] = {"duration": 0, "scores": []}
+    
     for seg in transcript_segments:
         # assign speaker to segment (if any)
         diarize_df['intersection'] = np.minimum(diarize_df['end'], seg['end']) - np.maximum(diarize_df['start'], seg['start'])
@@ -49,6 +54,12 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
             speaker_values = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False)
             seg["speaker"] = speaker_values.index[0] # most common speaker
             seg["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()     
+            
+            speakers[speaker_values.index[0]]["duration"] += seg["end"] - seg["start"]
+            speakers[speaker_values.index[0]]["scores"].append(seg["speaker_score"]) 
+        else:
+            seg["speaker"] = None
+            seg["speaker_score"] = 0
         
         # assign speaker to words
         if 'words' in seg:
@@ -66,7 +77,12 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
                         speaker_values = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False)
                         word["speaker"] = speaker_values.index[0] # most common speaker
                         word["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()
-    
+                    else:
+                        word["speaker"] = None
+                        word["speaker_score"] = 0
+    # convert speakers to list
+    speakers = [{"id": k, "duration": v["duration"], "score": sum(v["scores"]) / len(v["scores"])} for k, v in speakers.items()]
+    transcript_result["speakers"] = speakers
     return transcript_result            
 
 
