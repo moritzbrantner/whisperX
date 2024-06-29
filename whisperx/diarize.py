@@ -58,7 +58,7 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
             speakers[speaker_values.index[0]]["duration"] += seg["end"] - seg["start"]
             speakers[speaker_values.index[0]]["scores"].append(seg["speaker_score"]) 
         else:
-            seg["speaker"] = None
+            seg["speaker"] = "UNIDENTIFIED"
             seg["speaker_score"] = 0
         
         # assign speaker to words
@@ -76,18 +76,25 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
                         # sum over speakers
                         speaker_values = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False)
                         word["speaker"] = speaker_values.index[0] # most common speaker
-                        word["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()
+                        if speaker_values.sum() > 0:
+                            word["speaker_score"] = speaker_values.iloc[0] / speaker_values.sum()
+                        else:
+                            word["speaker_score"] = 0
                     else:
-                        word["speaker"] = None
+                        word["speaker"] = "UNIDENTIFIED"
                         word["speaker_score"] = 0
     # convert speakers to list
-    speakers = [{"id": k, "duration": v["duration"], "score": sum(v["scores"]) / len(v["scores"])} for k, v in speakers.items()]
+    speakers = [{
+        "id": k, 
+        "duration": v["duration"], 
+        "score": (sum(v["scores"]) / len(v["scores"])) if len(v["scores"]) > 0 else 0
+    } for k, v in speakers.items()]
     transcript_result["speakers"] = speakers
     return transcript_result            
 
 
 class Segment:
-    def __init__(self, start, end, speaker=None):
+    def __init__(self, start, end, speaker="UNIDENTIFIED"):
         self.start = start
         self.end = end
         self.speaker = speaker
