@@ -2,6 +2,7 @@ import configargparse as argparse
 import gc
 import os
 import warnings
+import json
 
 import numpy as np
 import torch
@@ -11,7 +12,7 @@ from .asr import load_model
 from .audio import load_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .utils import (LANGUAGES, TO_LANGUAGE_CODE, get_writer, optional_float,
-                    optional_int, str2bool)
+                    optional_int, str2bool, remove_extension)
 
 
 def cli():
@@ -165,13 +166,31 @@ def cli():
         warnings.warn("--max_line_count has no effect without --max_line_width")
     writer_args = {arg: args.pop(arg) for arg in word_options}
     
+    audio_paths = args.pop("audio")
+    
+    print(">> Processing " + str(len(audio_paths)) + " audio files...")
+    
     # Part 1: VAD & ASR Loop
     results = []
     tmp_results = []
     # model = load_model(model_name, device=device, download_root=model_dir)
     model = load_model(model_name, device=device, device_index=device_index, download_root=model_dir, compute_type=compute_type, language=args['language'], asr_options=asr_options, vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, task=task, threads=faster_whisper_threads)
 
-    for audio_path in args.pop("audio"):
+    for audio_path in audio_paths:
+        # check if json file exists
+        result_name = remove_extension(audio_path) + ".json"
+        if os.path.exists(result_name):
+            
+            # load json file
+            with open(result_name, "r") as f:
+                json_data = json.load(f)
+                
+            if model_name == json_data["model"]:
+                print(f"Skipping {audio_path}, json file already exists.")
+                results.append((json_data, audio_path))
+                audio = None
+                continue
+        
         audio = load_audio(audio_path)
         # >> VAD & ASR
         print(">>Performing transcription...")
@@ -191,17 +210,26 @@ def cli():
         align_model, align_metadata = load_align_model(align_language, device, model_name=align_model)
         for result, audio_path in tmp_results:
             # >> Align
-            if len(tmp_results) > 1:
+            if len(tmp_results) > 1 or audio is None:
                 input_audio = audio_path
             else:
                 # lazily load audio from part 1
                 input_audio = audio
+                
+            if result.get("align_model", None) == align_metadata["model_name"]:
+                print(f"Skipping alignment for {audio_path}, already aligned.")
+                results.append((result, audio_path))
+                continue
 
             if align_model is not None and len(result["segments"]) > 0:
                 if result.get("language", "en") != align_metadata["language"]:
                     # load new language
                     print(f"New language found ({result['language']})! Previous was ({align_metadata['language']}), loading new alignment model for new language...")
-                    align_model, align_metadata = load_align_model(result["language"], device)
+                    try:
+                        align_model, align_metadata = load_align_model(result["language"], device)
+                    except:
+                        results.append((result, audio_path))
+                        continue
                 print(">>Performing alignment...")
                 result = align(result["segments"], align_model, align_metadata, input_audio, device, interpolate_method=interpolate_method, return_char_alignments=return_char_alignments, print_progress=print_progress)
                 result["align_model"] = align_metadata["model_name"]
@@ -218,10 +246,15 @@ def cli():
         if hf_token is None:
             print("Warning, no --hf_token used, needs to be saved in environment variable, otherwise will throw error loading diarization model...")
         tmp_results = results
-        print(">>Performing diarization...")
+        
         results = []
         diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
         for result, input_audio_path in tmp_results:
+            if result.get("diarize_model", None) == diarize_model.model_name:
+                print(f"Skipping diarization for {input_audio_path}, already diarized.")
+                results.append((result, input_audio_path))
+                continue
+            print(">>Performing diarization...")
             diarize_segments = diarize_model(input_audio_path, min_speakers=min_speakers, max_speakers=max_speakers)
             diarize_result = assign_word_speakers(diarize_segments, result)
             diarize_result["diarize_model"] = diarize_model.model_name

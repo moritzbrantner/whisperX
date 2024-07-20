@@ -188,6 +188,8 @@ def format_timestamp(
         f"{hours_marker}{minutes:02d}:{seconds:02d}{decimal_marker}{milliseconds:03d}"
     )
 
+def remove_extension(path: str) -> str:
+    return "".join(os.path.splitext(path)[0:-1])
 
 class ResultWriter:
     extension: str
@@ -197,9 +199,10 @@ class ResultWriter:
 
     def __call__(self, result: dict, audio_path: str, options: dict):
         audio_basename = os.path.basename(audio_path)
+        path = os.path.dirname(audio_path)
         audio_basename = os.path.splitext(audio_basename)[0]
         output_path = os.path.join(
-            self.output_dir, audio_basename + "." + self.extension
+            self.output_dir, path + os.sep + audio_basename + "." + self.extension
         )
 
         with open(output_path, "w", encoding="utf-8") as f:
