@@ -1,3 +1,4 @@
+import json
 import configargparse as argparse
 import gc
 import os
@@ -9,11 +10,12 @@ import torch
 
 from .alignment import align, load_align_model
 from .asr import load_model
-from .audio import load_audio
+from .audio import load_audio, save_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .utils import (LANGUAGES, TO_LANGUAGE_CODE, get_writer, optional_float,
                     optional_int, str2bool, remove_extension)
 
+version = "1.0.0" 
 
 def cli():
     # fmt: off
@@ -80,8 +82,20 @@ def cli():
 
     parser.add_argument("--print_progress", type=str2bool, default = False, help = "if True, progress will be printed in transcribe() and align() methods.")
     # fmt: on
+    
+    # parser.add_argument("--only_diarize", action='store_true', help="Do not perform phoneme alignment")
+    parser.add_argument("--known_speakers_dir", type=str, default=None, help="directory from which to load known speakers for diarization")
+    parser.add_argument("--save_speakers_dir", type=str, default=None, help="Directory to save speakers to for diarization")
+    
+    
+    
 
     args = parser.parse_args().__dict__
+    
+    # myBoolean = args.pop("only_diarize")
+    known_speakers_dir = args.pop("known_speakers_dir")
+    save_speakers_dir = args.pop("save_speakers_dir")
+    
     model_name: str = args.pop("model")
     batch_size: int = args.pop("batch_size")
     model_dir: str = args.pop("model_dir")
@@ -166,17 +180,29 @@ def cli():
         warnings.warn("--max_line_count has no effect without --max_line_width")
     writer_args = {arg: args.pop(arg) for arg in word_options}
     
-    audio_paths = args.pop("audio")
     
+    
+    audio_paths = args.pop("audio")    
     print(">> Processing " + str(len(audio_paths)) + " audio files...")
     
     # Part 1: VAD & ASR Loop
     results = []
     tmp_results = []
-    # model = load_model(model_name, device=device, download_root=model_dir)
-    model = load_model(model_name, device=device, device_index=device_index, download_root=model_dir, compute_type=compute_type, language=args['language'], asr_options=asr_options, vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, task=task, threads=faster_whisper_threads)
+    model = load_model(
+        model_name, 
+        device=device, 
+        device_index=device_index, 
+        download_root=model_dir, 
+        compute_type=compute_type, 
+        language=args['language'], 
+        asr_options=asr_options, 
+        vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, 
+        task=task, 
+        threads=faster_whisper_threads)
 
+    index = 0
     for audio_path in audio_paths:
+        index += 1
         # check if json file exists
         result_name = remove_extension(audio_path) + ".json"
         if os.path.exists(result_name):
@@ -184,8 +210,10 @@ def cli():
             # load json file
             with open(result_name, "r") as f:
                 json_data = json.load(f)
+                # check if json_data contains key "model" and if it is the same as the current model
                 
-            if model_name == json_data["model"]:
+            old_name = json_data["model"] if "model" in json_data else None
+            if model_name == old_name:
                 print(f"Skipping {audio_path}, json file already exists.")
                 results.append((json_data, audio_path))
                 audio = None
@@ -193,10 +221,13 @@ def cli():
         
         audio = load_audio(audio_path)
         # >> VAD & ASR
-        print(">>Performing transcription...")
+        print(">>Performing transcription " + str(index) + "/" + str(len(audio_paths)) + " (" + audio_path + ")")
         result = model.transcribe(audio, batch_size=batch_size, chunk_size=chunk_size, print_progress=print_progress)
+        result["model"] = model_name
         results.append((result, audio_path))
-
+        if True:
+            with open(result_name, "w") as f:
+                json.dump(result, f)
 
     # Unload Whisper and VAD
     del model
@@ -206,9 +237,12 @@ def cli():
     # Part 2: Align Loop
     if not no_align:
         tmp_results = results
+        index = 0
         results = []
         align_model, align_metadata = load_align_model(align_language, device, model_name=align_model)
         for result, audio_path in tmp_results:
+            index += 1
+            result_name = remove_extension(audio_path) + ".json"
             # >> Align
             if len(tmp_results) > 1 or audio is None:
                 input_audio = audio_path
@@ -221,19 +255,23 @@ def cli():
                 results.append((result, audio_path))
                 continue
 
-            if align_model is not None and len(result["segments"]) > 0:
-                if result.get("language", "en") != align_metadata["language"]:
-                    # load new language
-                    print(f"New language found ({result['language']})! Previous was ({align_metadata['language']}), loading new alignment model for new language...")
-                    try:
-                        align_model, align_metadata = load_align_model(result["language"], device)
-                    except:
-                        results.append((result, audio_path))
-                        continue
-                print(">>Performing alignment...")
-                result = align(result["segments"], align_model, align_metadata, input_audio, device, interpolate_method=interpolate_method, return_char_alignments=return_char_alignments, print_progress=print_progress)
-                result["align_model"] = align_metadata["model_name"]
-                    
+            if align_model is None or len(result["segments"]) == 0:
+                continue
+            if result.get("language", "en") != align_metadata["language"]:
+                # load new language
+                print(f"New language found ({result['language']})! Previous was ({align_metadata['language']}), loading new alignment model for new language...")
+                try:
+                    align_model, align_metadata = load_align_model(result["language"], device)
+                except:
+                    results.append((result, audio_path))
+                    continue
+            print(">>Performing alignment " + str(index) + "/" + str(len(tmp_results)))
+            align_result = align(result["segments"], align_model, align_metadata, input_audio, device, interpolate_method=interpolate_method, return_char_alignments=return_char_alignments, print_progress=print_progress)
+            align_result["align_model"] = align_metadata["model_name"]
+            result.update(align_result) # merge align_result into result
+            if True:
+                with open(result_name, "w") as f:
+                    json.dump(result, f)        
             results.append((result, audio_path))
 
         # Unload align model
@@ -241,28 +279,47 @@ def cli():
         gc.collect()
         torch.cuda.empty_cache()
 
-    # >> Diarize
+    # Part 3: Diarize
     if diarize:
         if hf_token is None:
             print("Warning, no --hf_token used, needs to be saved in environment variable, otherwise will throw error loading diarization model...")
         tmp_results = results
-        
+        index = 0
         results = []
-        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
-        for result, input_audio_path in tmp_results:
+        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device, )
+        for result, audio_path in tmp_results:
+            index += 1
+            result_name = remove_extension(audio_path) + ".json"
+                        
             if result.get("diarize_model", None) == diarize_model.model_name:
-                print(f"Skipping diarization for {input_audio_path}, already diarized.")
-                results.append((result, input_audio_path))
+                print(f"Skipping diarization for {audio_path}, already diarized.")
+                results.append((result, audio_path))
                 continue
-            print(">>Performing diarization...")
-            diarize_segments = diarize_model(input_audio_path, min_speakers=min_speakers, max_speakers=max_speakers)
+            
+            print(">>Performing diarization " + str(index) + "/" + str(len(tmp_results)))
+            diarize_segments = diarize_model(
+                audio_path, 
+                min_speakers=min_speakers, 
+                max_speakers=max_speakers, 
+                known_speakers_dir=known_speakers_dir, 
+                save_speakers_dir=save_speakers_dir)
+            
             diarize_result = assign_word_speakers(diarize_segments, result)
             diarize_result["diarize_model"] = diarize_model.model_name
-            results.append((diarize_result, input_audio_path))
+            results.append((diarize_result, audio_path))
+            if True:
+                with open(result_name, "w") as f:
+                    json.dump(diarize_result, f)
+            
+        del diarize_model
+        gc.collect()
+        torch.cuda.empty_cache() 
+    
     # >> Write
     for result, audio_path in results:
         result["language"] = align_language
         result["model"] = model_name
+        result["version"] = version
         writer(result, audio_path, writer_args)
 
 if __name__ == "__main__":

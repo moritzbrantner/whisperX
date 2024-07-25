@@ -61,9 +61,31 @@ def load_audio(file: str, sr: int = SAMPLE_RATE):
         out = subprocess.run(cmd, capture_output=True, check=True).stdout
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
-
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
+def save_audio(file: str, audio_data: np.ndarray, sr: int = SAMPLE_RATE):
+    """
+    Open an audio file and write a mono waveform with given sample rate
+
+    Parameters
+    ----------
+    file: str
+        The audio file to open
+
+    sr: int
+        The sample rate to of the audio
+
+    Returns
+    -------
+    
+    """
+    try:
+        # Launches a subprocess to decode audio while down-mixing and resampling as necessary.
+        # Requires the ffmpeg CLI to be installed.
+        command = f'ffmpeg -y -f s16le -ar 16000 -ac 1 -acodec pcm_s16le -i - {file}'
+        subprocess.run(command, input=(audio_data * 32768.0).astype(np.int16).tobytes(), shell=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to write audio: {e.stderr.decode()}") from e
 
 def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
     """
