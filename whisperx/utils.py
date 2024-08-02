@@ -201,8 +201,11 @@ class ResultWriter:
         audio_basename = os.path.basename(audio_path)
         path = os.path.dirname(audio_path)
         audio_basename = os.path.splitext(audio_basename)[0]
+        translation: Optional[bool] = options.get("translation")
         output_path = os.path.join(
-            self.output_dir, path + os.sep + audio_basename + "." + self.extension
+            self.output_dir, path + os.sep + audio_basename + "." 
+            + ("en." if translation != None else "") 
+            + self.extension
         )
 
         with open(output_path, "w", encoding="utf-8") as f:
@@ -415,7 +418,7 @@ class WriteJSON(ResultWriter):
 
 
 def get_writer(
-    output_format: str, output_dir: str
+    output_format: str, output_dir: str, translation: bool = False
 ) -> Callable[[dict, TextIO, dict], None]:
     writers = {
         "txt": WriteTXT,

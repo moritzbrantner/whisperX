@@ -5,3 +5,5 @@ transformers
 pandas
 setuptools>=65
 nltk
+configargparse
+flair

@@ -8,7 +8,7 @@ import json
 import numpy as np
 import torch
 
-from .alignment import align, load_align_model
+from .alignment import align, get_align_model_name, load_align_model
 from .asr import load_model
 from .audio import load_audio, save_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
@@ -18,7 +18,6 @@ from .utils import (LANGUAGES, TO_LANGUAGE_CODE, get_writer, optional_float,
 version = "1.0.0" 
 
 def cli():
-    # fmt: off
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter, 
         default_config_files=['./whisperx.conf','~/whisperx.conf'])
@@ -32,13 +31,12 @@ def cli():
 
     parser.add_argument("--output_dir", "-o", type=str, default=".", help="directory to save the outputs")
     parser.add_argument("--output_format", "-f", type=str, default="all", choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"], help="format of the output file; if not specified, all available formats will be produced")
+    
     parser.add_argument("--verbose", type=str2bool, default=True, help="whether to print out the progress and debug messages")
 
-    parser.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"], help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
     parser.add_argument("--language", type=str, default=None, choices=sorted(LANGUAGES.keys()) + sorted([k.title() for k in TO_LANGUAGE_CODE.keys()]), help="language spoken in the audio, specify None to perform language detection")
 
     # alignment params
-    parser.add_argument("--align_model", default=None, help="Name of phoneme-level ASR model to do alignment")
     parser.add_argument("--interpolate_method", default="nearest", choices=["nearest", "linear", "ignore"], help="For word .srt, method to assign timestamps to non-aligned words, or merge them into neighbouring.")
     parser.add_argument("--no_align", action='store_true', help="Do not perform phoneme alignment")
     parser.add_argument("--return_char_alignments", action='store_true', help="Return character-level alignments in the output json file")
@@ -50,9 +48,18 @@ def cli():
 
     # diarization params
     parser.add_argument("--diarize", action="store_true", help="Apply diarization to assign speaker labels to each segment/word")
+    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face Access Token to access PyAnnote gated models")
     parser.add_argument("--min_speakers", default=None, type=int, help="Minimum number of speakers to in audio file")
     parser.add_argument("--max_speakers", default=None, type=int, help="Maximum number of speakers to in audio file")
-
+    parser.add_argument("--known_speakers_dir", type=str, default=None, help="directory from which to load known speakers for diarization")
+    parser.add_argument("--save_speakers_dir", type=str, default=None, help="Directory to save speakers to for diarization")
+    
+    # translation params
+    parser.add_argument("--translate", action="store_true", help="Translate the transcribed text to English")
+    
+    # NER params
+    parser.add_argument("--recognize_entities", action="store_true", help="Recognize named entities in the transcribed text")
+    
     parser.add_argument("--temperature", type=float, default=0, help="temperature to use for sampling")
     parser.add_argument("--best_of", type=optional_int, default=5, help="number of candidates when sampling with non-zero temperature")
     parser.add_argument("--beam_size", type=optional_int, default=5, help="number of beams in beam search, only applicable when temperature is zero")
@@ -78,21 +85,11 @@ def cli():
 
     parser.add_argument("--threads", type=optional_int, default=0, help="number of threads used by torch for CPU inference; supercedes MKL_NUM_THREADS/OMP_NUM_THREADS")
 
-    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face Access Token to access PyAnnote gated models")
-
     parser.add_argument("--print_progress", type=str2bool, default = False, help = "if True, progress will be printed in transcribe() and align() methods.")
     # fmt: on
     
-    # parser.add_argument("--only_diarize", action='store_true', help="Do not perform phoneme alignment")
-    parser.add_argument("--known_speakers_dir", type=str, default=None, help="directory from which to load known speakers for diarization")
-    parser.add_argument("--save_speakers_dir", type=str, default=None, help="Directory to save speakers to for diarization")
-    
-    
-    
-
     args = parser.parse_args().__dict__
     
-    # myBoolean = args.pop("only_diarize")
     known_speakers_dir = args.pop("known_speakers_dir")
     save_speakers_dir = args.pop("save_speakers_dir")
     
@@ -108,14 +105,10 @@ def cli():
     # model_flush: bool = args.pop("model_flush")
     os.makedirs(output_dir, exist_ok=True)
 
-    align_model: str = args.pop("align_model")
+    # alignment params
+    # align_model: str = args.pop("align_model")
     interpolate_method: str = args.pop("interpolate_method")
     no_align: bool = args.pop("no_align")
-    task : str = args.pop("task")
-    if task == "translate":
-        # translation cannot be aligned
-        no_align = True
-
     return_char_alignments: bool = args.pop("return_char_alignments")
 
     hf_token: str = args.pop("hf_token")
@@ -124,9 +117,17 @@ def cli():
 
     chunk_size: int = args.pop("chunk_size")
 
+    # diarization params
     diarize: bool = args.pop("diarize")
     min_speakers: int = args.pop("min_speakers")
     max_speakers: int = args.pop("max_speakers")
+
+    # translation params    
+    translate : str = args.pop("translate")
+    
+    # NER params
+    recognize_entities: bool = args.pop("recognize_entities")
+
     print_progress: bool = args.pop("print_progress")
 
     if args["language"] is not None:
@@ -181,7 +182,6 @@ def cli():
     writer_args = {arg: args.pop(arg) for arg in word_options}
     
     
-    
     audio_paths = args.pop("audio")    
     print(">> Processing " + str(len(audio_paths)) + " audio files...")
     
@@ -197,7 +197,7 @@ def cli():
         language=args['language'], 
         asr_options=asr_options, 
         vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, 
-        task=task, 
+        task="transcribe", 
         threads=faster_whisper_threads)
 
     index = 0
@@ -206,7 +206,6 @@ def cli():
         # check if json file exists
         result_name = remove_extension(audio_path) + ".json"
         if os.path.exists(result_name):
-            
             # load json file
             with open(result_name, "r") as f:
                 json_data = json.load(f)
@@ -239,7 +238,8 @@ def cli():
         tmp_results = results
         index = 0
         results = []
-        align_model, align_metadata = load_align_model(align_language, device, model_name=align_model)
+        align_model = None
+        last_language = None
         for result, audio_path in tmp_results:
             index += 1
             result_name = remove_extension(audio_path) + ".json"
@@ -249,19 +249,22 @@ def cli():
             else:
                 # lazily load audio from part 1
                 input_audio = audio
-                
-            if result.get("align_model", None) == align_metadata["model_name"]:
+            if len(result["segments"]) == 0:
+                continue
+            
+            current_language = result["language"]
+            if result.get("align_model", None) == get_align_model_name(current_language):
                 print(f"Skipping alignment for {audio_path}, already aligned.")
                 results.append((result, audio_path))
                 continue
 
-            if align_model is None or len(result["segments"]) == 0:
-                continue
-            if result.get("language", "en") != align_metadata["language"]:
-                # load new language
-                print(f"New language found ({result['language']})! Previous was ({align_metadata['language']}), loading new alignment model for new language...")
+
+            if current_language != last_language:
+                # load new language model
+                print(f"New language found ({result['language']})! Loading new alignment model...")
                 try:
                     align_model, align_metadata = load_align_model(result["language"], device)
+                    last_language = current_language
                 except:
                     results.append((result, audio_path))
                     continue
@@ -273,11 +276,14 @@ def cli():
                 with open(result_name, "w") as f:
                     json.dump(result, f)        
             results.append((result, audio_path))
+            print(result["language"])
 
         # Unload align model
-        del align_model
-        gc.collect()
-        torch.cuda.empty_cache()
+        if align_model is not None:
+            del align_model
+            gc.collect()
+            torch.cuda.empty_cache()
+    
 
     # Part 3: Diarize
     if diarize:
@@ -313,14 +319,145 @@ def cli():
             
         del diarize_model
         gc.collect()
-        torch.cuda.empty_cache() 
+        torch.cuda.empty_cache()
+        
+    # Part 4: Translations
+    if translate: 
+        translation_results = []
+        translation_model = load_model(
+            model_name, 
+            device=device, 
+            device_index=device_index, 
+            download_root=model_dir, 
+            compute_type=compute_type, 
+            language=args['language'], 
+            asr_options=asr_options, 
+            vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, 
+            task="translate", 
+            threads=faster_whisper_threads)
+
+        index = 0
+        for result, audio_path in results:
+            if(result.get("language", "en") == "en"):
+                continue
+            index += 1
+            # check if json file exists
+            translation_result_name = remove_extension(audio_path) + ".en.json"
+            if os.path.exists(translation_result_name):
+            
+                # load json file
+                with open(translation_result_name, "r") as f:
+                    json_data = json.load(f)
+                    old_name = json_data["model"] if "model" in json_data else None
+                    if model_name == old_name:
+                        print(f"Skipping {audio_path}, json file already exists.")
+                        translation_results.append((json_data, audio_path))
+                        continue
+        
+            audio = load_audio(audio_path)
+            # >> VAD & ASR
+            print(">>Performing translation " + str(index) + "/" + str(len(results)) + " (" + audio_path + ")")
+            result = translation_model.transcribe(
+                audio, 
+                batch_size=batch_size, 
+                chunk_size=chunk_size, 
+                print_progress=print_progress, 
+                task="translate")
+            result["model"] = model_name
+        
+            translation_results.append((result, audio_path))
+            if True:
+                with open(translation_result_name, "w") as f:
+                    json.dump(result, f)
+
+        # Unload Whisper and VAD
+        del translation_model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # Part 5: Named Entity Recognition
     
+    from flair.models import SequenceTagger
+    from flair.splitter import SegtokSentenceSplitter
+    
+    if recognize_entities:
+        
+        splitter = SegtokSentenceSplitter()        
+        ner_dict = {
+            "en": "flair/ner-english-large",
+            "de": "flair/ner-german-large",
+            "fr": "flair/ner-french-large",
+            "es": "flair/ner-spanish-large",
+            "dk": "flair/ner-danish-large",
+            "nl": "flair/ner-dutch-large",
+        }
+        tmp_results = results
+        results = []
+        index = 0
+        tagger = None
+        last_language = None
+        
+        for result, audio_path in tmp_results:
+            if len(result["segments"]) == 0:
+                continue
+            
+            language = result.get("language")
+            if language != last_language:
+                ner_model_name = ner_dict.get(language, None)
+                if ner_model_name is None:
+                    print(">> No NER model for " + language)
+                    continue
+                print(">> Loading NER model for " + language + " (" + ner_model_name + ")")
+                tagger = SequenceTagger.load(ner_model_name)
+                last_language = language
+                
+            if tagger is None:
+                print(">> No NER model loaded")
+                continue
+            
+            if result.get("ner_model", None) == ner_model_name:
+                print(f"Skipping NER for {audio_path}, entities already recognized.")
+                results.append((result, audio_path))
+                continue
+            
+            index += 1
+            print(">>Performing named entity recognition " + str(index) + "/" + str(len(tmp_results)) + " (" + audio_path + ")")
+                        
+            segments = []
+            for segment in result["segments"]:
+                text = segment["text"]
+                sentences = splitter.split(text)
+                tagger.predict(sentences)                  
+                                
+                offset = 0
+                entities = []
+                for sentence in sentences:
+                    current_dict = sentence.to_dict(tag_type="ner")
+                    for entity in current_dict["entities"]:
+                        entity["start_pos"] += offset
+                        entity["end_pos"] += offset
+                        entities.append(entity)
+                    offset += len(sentence.to_original_text())
+                
+                segment.update({"entities": entities})
+                segments.append(segment)
+            result["segments"] = segments
+            result["ner_model"] = ner_model_name
+            results.append((result, audio_path))
+
     # >> Write
+    
     for result, audio_path in results:
-        result["language"] = align_language
-        result["model"] = model_name
+        print(">> Writing results for " + audio_path)
         result["version"] = version
         writer(result, audio_path, writer_args)
+        
+    if translate:
+        writer_args.update({"translation": True })        
+        for result, audio_path in translation_results:
+            print(">> Writing translation for " + audio_path)
+            result["version"] = version
+            writer(result, audio_path, writer_args)
 
 if __name__ == "__main__":
     cli()

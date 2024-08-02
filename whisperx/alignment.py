@@ -58,19 +58,17 @@ DEFAULT_ALIGN_MODELS_HF = {
     "la": "lsb/wav2vec2-base-it-latin",
 }
 
+def get_align_model_name(language_code):
+    if language_code in DEFAULT_ALIGN_MODELS_TORCH:
+        return DEFAULT_ALIGN_MODELS_TORCH[language_code]
+    elif language_code in DEFAULT_ALIGN_MODELS_HF:
+        return DEFAULT_ALIGN_MODELS_HF[language_code]
+    else:
+        print(f"There is no default alignment model set for this language ({language_code}).\
+            Please find a wav2vec2.0 model finetuned on this language in https://huggingface.co/models, then pass the model name in --align_model [MODEL_NAME]")
+        raise ValueError(f"No default align-model for language: {language_code}")
 
-def load_align_model(language_code, device, model_name=None, model_dir=None):
-    if model_name is None:
-        # use default model
-        if language_code in DEFAULT_ALIGN_MODELS_TORCH:
-            model_name = DEFAULT_ALIGN_MODELS_TORCH[language_code]
-        elif language_code in DEFAULT_ALIGN_MODELS_HF:
-            model_name = DEFAULT_ALIGN_MODELS_HF[language_code]
-        else:
-            print(f"There is no default alignment model set for this language ({language_code}).\
-                Please find a wav2vec2.0 model finetuned on this language in https://huggingface.co/models, then pass the model name in --align_model [MODEL_NAME]")
-            raise ValueError(f"No default align-model for language: {language_code}")
-
+def load_align_model(device, model_name=None, model_dir=None):
     if model_name in torchaudio.pipelines.__all__:
         pipeline_type = "torchaudio"
         bundle = torchaudio.pipelines.__dict__[model_name]
@@ -90,7 +88,7 @@ def load_align_model(language_code, device, model_name=None, model_dir=None):
         labels = processor.tokenizer.get_vocab()
         align_dictionary = {char.lower(): code for char,code in processor.tokenizer.get_vocab().items()}
 
-    align_metadata = {"model_name": model_name,"language": language_code, "dictionary": align_dictionary, "type": pipeline_type}
+    align_metadata = {"model_name": model_name, "dictionary": align_dictionary, "type": pipeline_type}
 
     return align_model, align_metadata
 
