@@ -8,7 +8,7 @@ import json
 import numpy as np
 import torch
 
-from .alignment import align, get_align_model_name, load_align_model
+from .alignment import align, get_align_model_name, get_align_model
 from .asr import load_model
 from .audio import load_audio, save_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
@@ -144,7 +144,6 @@ def cli():
                 f"{model_name} is an English-only model but received '{args['language']}'; using English instead."
             )
         args["language"] = "en"
-    align_language = args["language"] if args["language"] is not None else "en" # default to loading english if not specified
 
     temperature = args.pop("temperature")
     if (increment := args.pop("temperature_increment_on_fallback")) is not None:
@@ -212,29 +211,45 @@ def cli():
                 # check if json_data contains key "model" and if it is the same as the current model
                 
             old_name = json_data["model"] if "model" in json_data else None
-            if model_name == old_name:
-                print(f"Skipping {audio_path}, json file already exists.")
-                results.append((json_data, audio_path))
-                audio = None
-                continue
+            if model_name == old_name:            
+                old_language = json_data["language"] if "language" in json_data else None
+                if args["language"] is None or args["language"] == old_language:
+                    print(f"Skipping {audio_path}, json file already exists.")
+                    results.append((json_data, audio_path))
+                    audio = None
+                    continue
+
         
-        audio = load_audio(audio_path)
+
         # >> VAD & ASR
         print(">>Performing transcription " + str(index) + "/" + str(len(audio_paths)) + " (" + audio_path + ")")
-        result = model.transcribe(audio, batch_size=batch_size, chunk_size=chunk_size, print_progress=print_progress)
-        result["model"] = model_name
-        results.append((result, audio_path))
-        if True:
-            with open(result_name, "w") as f:
-                json.dump(result, f)
-
+        audio = load_audio(audio_path)
+        for adjusted_batch_size in range(batch_size, 0, -1):
+            print(f"Trying batch size {adjusted_batch_size}")
+            try:
+                result = model.transcribe(audio, batch_size=adjusted_batch_size, chunk_size=chunk_size, print_progress=print_progress)
+                result["model"] = model_name
+                results.append((result, audio_path))
+                if True:
+                    with open(result_name, "w") as f:
+                        json.dump(result, f)
+            except:
+                continue
+            break
+        else:
+            print(">> Transcription failed for " + audio_path)
+            result = {"segments": [], "text": "", "language": args["language"]}
+            result["model"] = model_name
+            results.append((result, audio_path))
+        
     # Unload Whisper and VAD
     del model
     gc.collect()
     torch.cuda.empty_cache()
 
     # Part 2: Align Loop
-    if not no_align:
+    if True:
+        print(">> Aligning...")
         tmp_results = results
         index = 0
         results = []
@@ -244,11 +259,6 @@ def cli():
             index += 1
             result_name = remove_extension(audio_path) + ".json"
             # >> Align
-            if len(tmp_results) > 1 or audio is None:
-                input_audio = audio_path
-            else:
-                # lazily load audio from part 1
-                input_audio = audio
             if len(result["segments"]) == 0:
                 continue
             
@@ -258,25 +268,32 @@ def cli():
                 results.append((result, audio_path))
                 continue
 
-
             if current_language != last_language:
                 # load new language model
-                print(f"New language found ({result['language']})! Loading new alignment model...")
-                try:
-                    align_model, align_metadata = load_align_model(result["language"], device)
-                    last_language = current_language
-                except:
-                    results.append((result, audio_path))
-                    continue
+                print(f"New language found ({current_language})! Loading new alignment model...")
+                #try:
+                align_model, align_metadata = get_align_model(current_language, device)
+                last_language = current_language
+                #except:
+                 #   results.append((result, audio_path))
+                  #  continue
             print(">>Performing alignment " + str(index) + "/" + str(len(tmp_results)))
-            align_result = align(result["segments"], align_model, align_metadata, input_audio, device, interpolate_method=interpolate_method, return_char_alignments=return_char_alignments, print_progress=print_progress)
+            audio = load_audio(audio_path)
+            align_result = align(
+                result["segments"], 
+                align_model, 
+                align_metadata, 
+                audio, 
+                device, 
+                interpolate_method=interpolate_method, 
+                return_char_alignments=return_char_alignments, 
+                print_progress=print_progress)
             align_result["align_model"] = align_metadata["model_name"]
             result.update(align_result) # merge align_result into result
             if True:
                 with open(result_name, "w") as f:
                     json.dump(result, f)        
             results.append((result, audio_path))
-            print(result["language"])
 
         # Unload align model
         if align_model is not None:
@@ -357,93 +374,32 @@ def cli():
             audio = load_audio(audio_path)
             # >> VAD & ASR
             print(">>Performing translation " + str(index) + "/" + str(len(results)) + " (" + audio_path + ")")
-            result = translation_model.transcribe(
-                audio, 
-                batch_size=batch_size, 
-                chunk_size=chunk_size, 
-                print_progress=print_progress, 
-                task="translate")
-            result["model"] = model_name
-        
-            translation_results.append((result, audio_path))
-            if True:
-                with open(translation_result_name, "w") as f:
-                    json.dump(result, f)
+            # decreasing loop
+            for adjusted_batch_size in range(batch_size, 0, -1):
+                try:
+                    result = translation_model.transcribe(
+                        audio, 
+                        batch_size=adjusted_batch_size, 
+                        chunk_size=chunk_size, 
+                        print_progress=print_progress, 
+                        task="translate")
+                except:
+                    continue
+                result["model"] = model_name
+                result["language"] = "en"
+                translation_results.append((result, audio_path))
+                if True:
+                    with open(translation_result_name, "w") as f:
+                        json.dump(result, f)
+                break
+            else:
+                print(">> Translation failed for " + audio_path)
+                result = {"segments": [], "text": "", "language": "en"}
 
         # Unload Whisper and VAD
         del translation_model
         gc.collect()
         torch.cuda.empty_cache()
-
-    # Part 5: Named Entity Recognition
-    
-    from flair.models import SequenceTagger
-    from flair.splitter import SegtokSentenceSplitter
-    
-    if recognize_entities:
-        
-        splitter = SegtokSentenceSplitter()        
-        ner_dict = {
-            "en": "flair/ner-english-large",
-            "de": "flair/ner-german-large",
-            "fr": "flair/ner-french-large",
-            "es": "flair/ner-spanish-large",
-            "dk": "flair/ner-danish-large",
-            "nl": "flair/ner-dutch-large",
-        }
-        tmp_results = results
-        results = []
-        index = 0
-        tagger = None
-        last_language = None
-        
-        for result, audio_path in tmp_results:
-            if len(result["segments"]) == 0:
-                continue
-            
-            language = result.get("language")
-            if language != last_language:
-                ner_model_name = ner_dict.get(language, None)
-                if ner_model_name is None:
-                    print(">> No NER model for " + language)
-                    continue
-                print(">> Loading NER model for " + language + " (" + ner_model_name + ")")
-                tagger = SequenceTagger.load(ner_model_name)
-                last_language = language
-                
-            if tagger is None:
-                print(">> No NER model loaded")
-                continue
-            
-            if result.get("ner_model", None) == ner_model_name:
-                print(f"Skipping NER for {audio_path}, entities already recognized.")
-                results.append((result, audio_path))
-                continue
-            
-            index += 1
-            print(">>Performing named entity recognition " + str(index) + "/" + str(len(tmp_results)) + " (" + audio_path + ")")
-                        
-            segments = []
-            for segment in result["segments"]:
-                text = segment["text"]
-                sentences = splitter.split(text)
-                tagger.predict(sentences)                  
-                                
-                offset = 0
-                entities = []
-                for sentence in sentences:
-                    current_dict = sentence.to_dict(tag_type="ner")
-                    for entity in current_dict["entities"]:
-                        entity["start_pos"] += offset
-                        entity["end_pos"] += offset
-                        entities.append(entity)
-                    offset += len(sentence.to_original_text())
-                
-                segment.update({"entities": entities})
-                segments.append(segment)
-            result["segments"] = segments
-            result["ner_model"] = ner_model_name
-            results.append((result, audio_path))
 
     # >> Write
     
