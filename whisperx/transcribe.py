@@ -1,26 +1,90 @@
-import json
-import configargparse as argparse
 import gc
+import json
 import os
 import warnings
-import json
 
+import configargparse as argparse
 import numpy as np
 import torch
 
-from .alignment import align, get_align_model_name, get_align_model
+from .alignment import align, get_align_model, get_align_model_name
 from .asr import load_model
-from .audio import load_audio, save_audio
+from .audio import load_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
-from .utils import (LANGUAGES, TO_LANGUAGE_CODE, get_writer, optional_float,
-                    optional_int, str2bool, remove_extension)
+from .utils import (
+    LANGUAGES,
+    TO_LANGUAGE_CODE,
+    get_writer,
+    optional_float,
+    optional_int,
+    remove_extension,
+    str2bool,
+)
 
-version = "1.0.0" 
+version = "1.0.0"
+
+
+def _json_result_path(audio_path: str, translation: bool = False) -> str:
+    suffix = ".en.json" if translation else ".json"
+    return remove_extension(audio_path) + suffix
+
+
+def _load_cached_json(path: str):
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Warning: failed to read cached result '{path}': {exc}. Reprocessing file.")
+        return None
+
+
+def _write_json(path: str, data: dict):
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
+def _matches_transcription_cache(cached: dict, model_name: str, requested_language: str) -> bool:
+    if cached.get("model") != model_name:
+        return False
+
+    cached_language = cached.get("language")
+    if requested_language is not None and cached_language != requested_language:
+        return False
+
+    return "segments" in cached and "text" in cached
+
+
+def _transcribe_audio(model, audio, audio_path: str, total_audio: int, index: int, batch_size: int, chunk_size: int, print_progress: bool):
+    print(f">>Performing transcription {index}/{total_audio} ({audio_path})")
+    for adjusted_batch_size in range(batch_size, 0, -1):
+        print(f"Trying batch size {adjusted_batch_size}")
+        try:
+            return model.transcribe(
+                audio,
+                batch_size=adjusted_batch_size,
+                chunk_size=chunk_size,
+                print_progress=print_progress,
+            )
+        except Exception:
+            continue
+
+    return None
+
+
+def _cleanup_model(model):
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 def cli():
     parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter, 
-        default_config_files=['./whisperx.conf','~/whisperx.conf'])
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        default_config_files=["./whisperx.conf", "~/whisperx.conf"],
+    )
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
     parser.add_argument("--model", default="small", help="name of the Whisper model to use")
     parser.add_argument("--model_dir", type=str, default=None, help="the path to save model files; uses ~/.cache/whisper by default")
@@ -31,15 +95,15 @@ def cli():
 
     parser.add_argument("--output_dir", "-o", type=str, default=".", help="directory to save the outputs")
     parser.add_argument("--output_format", "-f", type=str, default="all", choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"], help="format of the output file; if not specified, all available formats will be produced")
-    
+
     parser.add_argument("--verbose", type=str2bool, default=True, help="whether to print out the progress and debug messages")
 
     parser.add_argument("--language", type=str, default=None, choices=sorted(LANGUAGES.keys()) + sorted([k.title() for k in TO_LANGUAGE_CODE.keys()]), help="language spoken in the audio, specify None to perform language detection")
 
     # alignment params
     parser.add_argument("--interpolate_method", default="nearest", choices=["nearest", "linear", "ignore"], help="For word .srt, method to assign timestamps to non-aligned words, or merge them into neighbouring.")
-    parser.add_argument("--no_align", action='store_true', help="Do not perform phoneme alignment")
-    parser.add_argument("--return_char_alignments", action='store_true', help="Return character-level alignments in the output json file")
+    parser.add_argument("--no_align", action="store_true", help="Do not perform phoneme alignment")
+    parser.add_argument("--return_char_alignments", action="store_true", help="Return character-level alignments in the output json file")
 
     # vad params
     parser.add_argument("--vad_onset", type=float, default=0.500, help="Onset threshold for VAD (see pyannote.audio), reduce this if speech is not being detected")
@@ -53,13 +117,13 @@ def cli():
     parser.add_argument("--max_speakers", default=None, type=int, help="Maximum number of speakers to in audio file")
     parser.add_argument("--known_speakers_dir", type=str, default=None, help="directory from which to load known speakers for diarization")
     parser.add_argument("--save_speakers_dir", type=str, default=None, help="Directory to save speakers to for diarization")
-    
+
     # translation params
     parser.add_argument("--translate", action="store_true", help="Translate the transcribed text to English")
-    
+
     # NER params
     parser.add_argument("--recognize_entities", action="store_true", help="Recognize named entities in the transcribed text")
-    
+
     parser.add_argument("--temperature", type=float, default=0, help="temperature to use for sampling")
     parser.add_argument("--best_of", type=optional_int, default=5, help="number of candidates when sampling with non-zero temperature")
     parser.add_argument("--beam_size", type=optional_int, default=5, help="number of beams in beam search, only applicable when temperature is zero")
@@ -85,14 +149,13 @@ def cli():
 
     parser.add_argument("--threads", type=optional_int, default=0, help="number of threads used by torch for CPU inference; supercedes MKL_NUM_THREADS/OMP_NUM_THREADS")
 
-    parser.add_argument("--print_progress", type=str2bool, default = False, help = "if True, progress will be printed in transcribe() and align() methods.")
-    # fmt: on
-    
+    parser.add_argument("--print_progress", type=str2bool, default=False, help="if True, progress will be printed in transcribe() and align() methods.")
+
     args = parser.parse_args().__dict__
-    
+
     known_speakers_dir = args.pop("known_speakers_dir")
     save_speakers_dir = args.pop("save_speakers_dir")
-    
+
     model_name: str = args.pop("model")
     batch_size: int = args.pop("batch_size")
     model_dir: str = args.pop("model_dir")
@@ -102,11 +165,8 @@ def cli():
     device_index: int = args.pop("device_index")
     compute_type: str = args.pop("compute_type")
 
-    # model_flush: bool = args.pop("model_flush")
     os.makedirs(output_dir, exist_ok=True)
 
-    # alignment params
-    # align_model: str = args.pop("align_model")
     interpolate_method: str = args.pop("interpolate_method")
     no_align: bool = args.pop("no_align")
     return_char_alignments: bool = args.pop("return_char_alignments")
@@ -117,16 +177,13 @@ def cli():
 
     chunk_size: int = args.pop("chunk_size")
 
-    # diarization params
     diarize: bool = args.pop("diarize")
     min_speakers: int = args.pop("min_speakers")
     max_speakers: int = args.pop("max_speakers")
 
-    # translation params    
-    translate : str = args.pop("translate")
-    
-    # NER params
-    recognize_entities: bool = args.pop("recognize_entities")
+    translate: bool = args.pop("translate")
+
+    _recognize_entities: bool = args.pop("recognize_entities")
 
     print_progress: bool = args.pop("print_progress")
 
@@ -179,241 +236,185 @@ def cli():
     if args["max_line_count"] and not args["max_line_width"]:
         warnings.warn("--max_line_count has no effect without --max_line_width")
     writer_args = {arg: args.pop(arg) for arg in word_options}
-    
-    
-    audio_paths = args.pop("audio")    
-    print(">> Processing " + str(len(audio_paths)) + " audio files...")
-    
+
+    audio_paths = args.pop("audio")
+    print(f">> Processing {len(audio_paths)} audio files...")
+
     # Part 1: VAD & ASR Loop
     results = []
-    tmp_results = []
     model = load_model(
-        model_name, 
-        device=device, 
-        device_index=device_index, 
-        download_root=model_dir, 
-        compute_type=compute_type, 
-        language=args['language'], 
-        asr_options=asr_options, 
-        vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, 
-        task="transcribe", 
-        threads=faster_whisper_threads)
+        model_name,
+        device=device,
+        device_index=device_index,
+        download_root=model_dir,
+        compute_type=compute_type,
+        language=args["language"],
+        asr_options=asr_options,
+        vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset},
+        task="transcribe",
+        threads=faster_whisper_threads,
+    )
 
-    index = 0
-    for audio_path in audio_paths:
-        index += 1
-        # check if json file exists
-        result_name = remove_extension(audio_path) + ".json"
-        if os.path.exists(result_name):
-            # load json file
-            with open(result_name, "r") as f:
-                json_data = json.load(f)
-                # check if json_data contains key "model" and if it is the same as the current model
-                
-            old_name = json_data["model"] if "model" in json_data else None
-            if model_name == old_name:            
-                old_language = json_data["language"] if "language" in json_data else None
-                if args["language"] is None or args["language"] == old_language:
-                    print(f"Skipping {audio_path}, json file already exists.")
-                    results.append((json_data, audio_path))
-                    audio = None
-                    continue
+    for index, audio_path in enumerate(audio_paths, start=1):
+        result_name = _json_result_path(audio_path)
+        cached_result = _load_cached_json(result_name)
+        if cached_result and _matches_transcription_cache(cached_result, model_name, args["language"]):
+            print(f"Skipping {audio_path}, parsed json file already exists.")
+            results.append((cached_result, audio_path))
+            continue
 
-        
-
-        # >> VAD & ASR
-        print(">>Performing transcription " + str(index) + "/" + str(len(audio_paths)) + " (" + audio_path + ")")
         audio = load_audio(audio_path)
-        for adjusted_batch_size in range(batch_size, 0, -1):
-            print(f"Trying batch size {adjusted_batch_size}")
-            try:
-                result = model.transcribe(audio, batch_size=adjusted_batch_size, chunk_size=chunk_size, print_progress=print_progress)
-                result["model"] = model_name
-                results.append((result, audio_path))
-                if True:
-                    with open(result_name, "w") as f:
-                        json.dump(result, f)
-            except:
-                continue
-            break
-        else:
-            print(">> Transcription failed for " + audio_path)
+        result = _transcribe_audio(model, audio, audio_path, len(audio_paths), index, batch_size, chunk_size, print_progress)
+        if result is None:
+            print(f">> Transcription failed for {audio_path}")
             result = {"segments": [], "text": "", "language": args["language"]}
-            result["model"] = model_name
-            results.append((result, audio_path))
-        
-    # Unload Whisper and VAD
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
+
+        result["model"] = model_name
+        _write_json(result_name, result)
+        results.append((result, audio_path))
+
+    _cleanup_model(model)
 
     # Part 2: Align Loop
     if True:
         print(">> Aligning...")
         tmp_results = results
-        index = 0
         results = []
         align_model = None
+        align_metadata = None
         last_language = None
-        for result, audio_path in tmp_results:
-            index += 1
-            result_name = remove_extension(audio_path) + ".json"
-            # >> Align
+
+        for index, (result, audio_path) in enumerate(tmp_results, start=1):
+            result_name = _json_result_path(audio_path)
             if len(result["segments"]) == 0:
                 continue
-            
+
             current_language = result["language"]
-            if result.get("align_model", None) == get_align_model_name(current_language):
+            if result.get("align_model") == get_align_model_name(current_language):
                 print(f"Skipping alignment for {audio_path}, already aligned.")
                 results.append((result, audio_path))
                 continue
 
             if current_language != last_language:
-                # load new language model
                 print(f"New language found ({current_language})! Loading new alignment model...")
-                #try:
                 align_model, align_metadata = get_align_model(current_language, device)
                 last_language = current_language
-                #except:
-                 #   results.append((result, audio_path))
-                  #  continue
-            print(">>Performing alignment " + str(index) + "/" + str(len(tmp_results)))
+
+            print(f">>Performing alignment {index}/{len(tmp_results)}")
             audio = load_audio(audio_path)
             align_result = align(
-                result["segments"], 
-                align_model, 
-                align_metadata, 
-                audio, 
-                device, 
-                interpolate_method=interpolate_method, 
-                return_char_alignments=return_char_alignments, 
-                print_progress=print_progress)
+                result["segments"],
+                align_model,
+                align_metadata,
+                audio,
+                device,
+                interpolate_method=interpolate_method,
+                return_char_alignments=return_char_alignments,
+                print_progress=print_progress,
+            )
             align_result["align_model"] = align_metadata["model_name"]
-            result.update(align_result) # merge align_result into result
-            if True:
-                with open(result_name, "w") as f:
-                    json.dump(result, f)        
+            result.update(align_result)
+            _write_json(result_name, result)
             results.append((result, audio_path))
 
-        # Unload align model
         if align_model is not None:
-            del align_model
-            gc.collect()
-            torch.cuda.empty_cache()
-    
+            _cleanup_model(align_model)
 
     # Part 3: Diarize
     if diarize:
         if hf_token is None:
             print("Warning, no --hf_token used, needs to be saved in environment variable, otherwise will throw error loading diarization model...")
+
         tmp_results = results
-        index = 0
         results = []
-        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device, )
-        for result, audio_path in tmp_results:
-            index += 1
-            result_name = remove_extension(audio_path) + ".json"
-                        
-            if result.get("diarize_model", None) == diarize_model.model_name:
+        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
+
+        for index, (result, audio_path) in enumerate(tmp_results, start=1):
+            result_name = _json_result_path(audio_path)
+            if result.get("diarize_model") == diarize_model.model_name:
                 print(f"Skipping diarization for {audio_path}, already diarized.")
                 results.append((result, audio_path))
                 continue
-            
-            print(">>Performing diarization " + str(index) + "/" + str(len(tmp_results)))
+
+            print(f">>Performing diarization {index}/{len(tmp_results)}")
             diarize_segments = diarize_model(
-                audio_path, 
-                min_speakers=min_speakers, 
-                max_speakers=max_speakers, 
-                known_speakers_dir=known_speakers_dir, 
-                save_speakers_dir=save_speakers_dir)
-            
+                audio_path,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                known_speakers_dir=known_speakers_dir,
+                save_speakers_dir=save_speakers_dir,
+            )
+
             diarize_result = assign_word_speakers(diarize_segments, result)
             diarize_result["diarize_model"] = diarize_model.model_name
+            _write_json(result_name, diarize_result)
             results.append((diarize_result, audio_path))
-            if True:
-                with open(result_name, "w") as f:
-                    json.dump(diarize_result, f)
-            
-        del diarize_model
-        gc.collect()
-        torch.cuda.empty_cache()
-        
+
+        _cleanup_model(diarize_model)
+
     # Part 4: Translations
-    if translate: 
+    if translate:
         translation_results = []
         translation_model = load_model(
-            model_name, 
-            device=device, 
-            device_index=device_index, 
-            download_root=model_dir, 
-            compute_type=compute_type, 
-            language=args['language'], 
-            asr_options=asr_options, 
-            vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset}, 
-            task="translate", 
-            threads=faster_whisper_threads)
+            model_name,
+            device=device,
+            device_index=device_index,
+            download_root=model_dir,
+            compute_type=compute_type,
+            language=args["language"],
+            asr_options=asr_options,
+            vad_options={"vad_onset": vad_onset, "vad_offset": vad_offset},
+            task="translate",
+            threads=faster_whisper_threads,
+        )
 
-        index = 0
-        for result, audio_path in results:
-            if(result.get("language", "en") == "en"):
+        for index, (result, audio_path) in enumerate(results, start=1):
+            if result.get("language", "en") == "en":
                 continue
-            index += 1
-            # check if json file exists
-            translation_result_name = remove_extension(audio_path) + ".en.json"
-            if os.path.exists(translation_result_name):
-            
-                # load json file
-                with open(translation_result_name, "r") as f:
-                    json_data = json.load(f)
-                    old_name = json_data["model"] if "model" in json_data else None
-                    if model_name == old_name:
-                        print(f"Skipping {audio_path}, json file already exists.")
-                        translation_results.append((json_data, audio_path))
-                        continue
-        
+
+            translation_result_name = _json_result_path(audio_path, translation=True)
+            cached_translation = _load_cached_json(translation_result_name)
+            if cached_translation and _matches_transcription_cache(cached_translation, model_name, "en"):
+                print(f"Skipping {audio_path}, translation json file already exists.")
+                translation_results.append((cached_translation, audio_path))
+                continue
+
             audio = load_audio(audio_path)
-            # >> VAD & ASR
-            print(">>Performing translation " + str(index) + "/" + str(len(results)) + " (" + audio_path + ")")
-            # decreasing loop
-            for adjusted_batch_size in range(batch_size, 0, -1):
-                try:
-                    result = translation_model.transcribe(
-                        audio, 
-                        batch_size=adjusted_batch_size, 
-                        chunk_size=chunk_size, 
-                        print_progress=print_progress, 
-                        task="translate")
-                except:
-                    continue
-                result["model"] = model_name
-                result["language"] = "en"
-                translation_results.append((result, audio_path))
-                if True:
-                    with open(translation_result_name, "w") as f:
-                        json.dump(result, f)
-                break
-            else:
-                print(">> Translation failed for " + audio_path)
-                result = {"segments": [], "text": "", "language": "en"}
+            print(f">>Performing translation {index}/{len(results)} ({audio_path})")
+            translation_result = _transcribe_audio(
+                translation_model,
+                audio,
+                audio_path,
+                len(results),
+                index,
+                batch_size,
+                chunk_size,
+                print_progress,
+            )
 
-        # Unload Whisper and VAD
-        del translation_model
-        gc.collect()
-        torch.cuda.empty_cache()
+            if translation_result is None:
+                print(f">> Translation failed for {audio_path}")
+                translation_result = {"segments": [], "text": "", "language": "en"}
 
-    # >> Write
-    
+            translation_result["model"] = model_name
+            translation_result["language"] = "en"
+            _write_json(translation_result_name, translation_result)
+            translation_results.append((translation_result, audio_path))
+
+        _cleanup_model(translation_model)
+
     for result, audio_path in results:
-        print(">> Writing results for " + audio_path)
+        print(f">> Writing results for {audio_path}")
         result["version"] = version
         writer(result, audio_path, writer_args)
-        
+
     if translate:
-        writer_args.update({"translation": True })        
+        writer_args.update({"translation": True})
         for result, audio_path in translation_results:
-            print(">> Writing translation for " + audio_path)
+            print(f">> Writing translation for {audio_path}")
             result["version"] = version
             writer(result, audio_path, writer_args)
+
 
 if __name__ == "__main__":
     cli()
