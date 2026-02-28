@@ -46,6 +46,7 @@ def _load_transcribe_module(monkeypatch):
 
     asr_module = types.ModuleType("whisperx.asr")
     asr_module.load_model_calls = []
+    asr_module.created_models = []
 
     class FakeModel:
         def __init__(self, task, language):
@@ -68,7 +69,9 @@ def _load_transcribe_module(monkeypatch):
 
     def load_model(model_name, **kwargs):
         asr_module.load_model_calls.append({"model_name": model_name, **kwargs})
-        return FakeModel(kwargs.get("task"), kwargs.get("language"))
+        model = FakeModel(kwargs.get("task"), kwargs.get("language"))
+        asr_module.created_models.append(model)
+        return model
 
     asr_module.load_model = load_model
     sys.modules["whisperx.asr"] = asr_module
@@ -76,8 +79,9 @@ def _load_transcribe_module(monkeypatch):
     audio_module = types.ModuleType("whisperx.audio")
 
     def load_audio(path):
-        return np.ones(8, dtype=np.float32)
+        return np.ones(128000, dtype=np.float32)
 
+    audio_module.SAMPLE_RATE = 16000
     audio_module.load_audio = load_audio
     sys.modules["whisperx.audio"] = audio_module
 
@@ -322,6 +326,61 @@ def test_cli_rejects_word_timing_options_when_no_align(monkeypatch, tmp_path):
             "--no_align",
             "--max_line_width",
             "40",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        transcribe_module.cli()
+
+
+def test_cli_live_chunking_transcribes_in_multiple_overlapping_chunks(monkeypatch, tmp_path):
+    transcribe_module, asr_module, _, _ = _load_transcribe_module(monkeypatch)
+
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "whisperx",
+            str(audio_path),
+            "--output_format",
+            "json",
+            "--live_chunk_size_sec",
+            "1.0",
+            "--live_chunk_overlap_sec",
+            "0.2",
+        ],
+    )
+
+    transcribe_module.cli()
+
+    transcription_model = asr_module.created_models[0]
+    assert len(transcription_model.transcribe_calls) == 10
+
+    result = json.loads((tmp_path / "sample.json").read_text())
+    assert len(result["segments"]) == 10
+    assert result["segments"][0]["start"] == pytest.approx(0.0)
+    assert result["segments"][-1]["end"] == pytest.approx(8.0)
+
+
+def test_cli_rejects_invalid_live_chunk_overlap(monkeypatch, tmp_path):
+    transcribe_module, _, _, _ = _load_transcribe_module(monkeypatch)
+
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "whisperx",
+            str(audio_path),
+            "--live_chunk_size_sec",
+            "1.0",
+            "--live_chunk_overlap_sec",
+            "1.0",
         ],
     )
 

@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import time
 import warnings
 
 import configargparse as argparse
@@ -9,7 +10,7 @@ import torch
 
 from .alignment import align, get_align_model, get_align_model_name
 from .asr import load_model
-from .audio import load_audio
+from .audio import SAMPLE_RATE, load_audio
 from .diarize import DiarizationPipeline, assign_word_speakers
 from .utils import (
     LANGUAGES,
@@ -72,6 +73,88 @@ def _transcribe_audio(model, audio, audio_path: str, total_audio: int, index: in
             continue
 
     return None
+
+
+def _iter_live_audio_chunks(audio: np.ndarray, chunk_size_sec: float, overlap_sec: float, sample_rate: int = SAMPLE_RATE):
+    chunk_samples = max(int(chunk_size_sec * sample_rate), 1)
+    overlap_samples = max(int(overlap_sec * sample_rate), 0)
+    step_samples = max(chunk_samples - overlap_samples, 1)
+
+    for start_idx in range(0, audio.shape[0], step_samples):
+        end_idx = min(start_idx + chunk_samples, audio.shape[0])
+        chunk = audio[start_idx:end_idx]
+        if chunk.size == 0:
+            continue
+        yield chunk, start_idx / sample_rate, end_idx / sample_rate
+        if end_idx >= audio.shape[0]:
+            break
+
+
+def _transcribe_audio_live(
+    model,
+    audio,
+    audio_path: str,
+    total_audio: int,
+    index: int,
+    batch_size: int,
+    chunk_size: int,
+    print_progress: bool,
+    live_chunk_size_sec: float,
+    live_chunk_overlap_sec: float,
+    live_chunk_interval_sec: float,
+):
+    combined_segments = []
+    language = None
+    text_parts = []
+    emitted_until = 0.0
+
+    chunks = list(_iter_live_audio_chunks(audio, live_chunk_size_sec, live_chunk_overlap_sec))
+    print(f">>Performing live-style transcription {index}/{total_audio} ({audio_path}) in {len(chunks)} chunks")
+
+    for chunk_idx, (chunk_audio, chunk_start, chunk_end) in enumerate(chunks, start=1):
+        if live_chunk_interval_sec > 0 and chunk_idx > 1:
+            time.sleep(live_chunk_interval_sec)
+
+        chunk_result = _transcribe_audio(
+            model,
+            chunk_audio,
+            f"{audio_path} [chunk {chunk_idx}/{len(chunks)} {chunk_start:.2f}-{chunk_end:.2f}s]",
+            len(chunks),
+            chunk_idx,
+            batch_size,
+            chunk_size,
+            print_progress,
+        )
+        if chunk_result is None:
+            continue
+
+        if language is None:
+            language = chunk_result.get("language")
+
+        for segment in chunk_result.get("segments", []):
+            shifted_segment = dict(segment)
+            shifted_start = float(segment.get("start", 0.0)) + chunk_start
+            shifted_end = min(float(segment.get("end", shifted_start)) + chunk_start, chunk_end)
+
+            if shifted_end <= emitted_until:
+                continue
+            if shifted_start < emitted_until:
+                shifted_start = emitted_until
+
+            shifted_segment["start"] = shifted_start
+            shifted_segment["end"] = shifted_end
+            combined_segments.append(shifted_segment)
+            emitted_until = max(emitted_until, shifted_end)
+
+        chunk_text = chunk_result.get("text", "").strip()
+        if chunk_text:
+            text_parts.append(chunk_text)
+
+    return {
+        "segments": combined_segments,
+        "text": " ".join(text_parts).strip(),
+        "language": language,
+    }
 
 
 def _cleanup_model(model):
@@ -150,6 +233,9 @@ def cli():
     parser.add_argument("--threads", type=optional_int, default=0, help="number of threads used by torch for CPU inference; supercedes MKL_NUM_THREADS/OMP_NUM_THREADS")
 
     parser.add_argument("--print_progress", type=str2bool, default=False, help="if True, progress will be printed in transcribe() and align() methods.")
+    parser.add_argument("--live_chunk_size_sec", type=optional_float, default=None, help="Enable live-style ingestion by splitting audio into chunks of this duration (seconds).")
+    parser.add_argument("--live_chunk_overlap_sec", type=float, default=0.5, help="Overlap (seconds) between live-style chunks.")
+    parser.add_argument("--live_chunk_interval_sec", type=float, default=0.0, help="Delay (seconds) between live-style chunks to simulate realtime feeding.")
 
     args = parser.parse_args().__dict__
 
@@ -186,6 +272,19 @@ def cli():
     _recognize_entities: bool = args.pop("recognize_entities")
 
     print_progress: bool = args.pop("print_progress")
+    live_chunk_size_sec: float = args.pop("live_chunk_size_sec")
+    live_chunk_overlap_sec: float = args.pop("live_chunk_overlap_sec")
+    live_chunk_interval_sec: float = args.pop("live_chunk_interval_sec")
+
+    if live_chunk_size_sec is not None:
+        if live_chunk_size_sec <= 0:
+            parser.error("--live_chunk_size_sec must be > 0")
+        if live_chunk_overlap_sec < 0:
+            parser.error("--live_chunk_overlap_sec must be >= 0")
+        if live_chunk_overlap_sec >= live_chunk_size_sec:
+            parser.error("--live_chunk_overlap_sec must be smaller than --live_chunk_size_sec")
+        if live_chunk_interval_sec < 0:
+            parser.error("--live_chunk_interval_sec must be >= 0")
 
     if args["language"] is not None:
         args["language"] = args["language"].lower()
@@ -264,7 +363,22 @@ def cli():
             continue
 
         audio = load_audio(audio_path)
-        result = _transcribe_audio(model, audio, audio_path, len(audio_paths), index, batch_size, chunk_size, print_progress)
+        if live_chunk_size_sec is None:
+            result = _transcribe_audio(model, audio, audio_path, len(audio_paths), index, batch_size, chunk_size, print_progress)
+        else:
+            result = _transcribe_audio_live(
+                model,
+                audio,
+                audio_path,
+                len(audio_paths),
+                index,
+                batch_size,
+                chunk_size,
+                print_progress,
+                live_chunk_size_sec,
+                live_chunk_overlap_sec,
+                live_chunk_interval_sec,
+            )
         if result is None:
             print(f">> Transcription failed for {audio_path}")
             result = {"segments": [], "text": "", "language": args["language"]}
@@ -381,16 +495,31 @@ def cli():
 
             audio = load_audio(audio_path)
             print(f">>Performing translation {index}/{len(results)} ({audio_path})")
-            translation_result = _transcribe_audio(
-                translation_model,
-                audio,
-                audio_path,
-                len(results),
-                index,
-                batch_size,
-                chunk_size,
-                print_progress,
-            )
+            if live_chunk_size_sec is None:
+                translation_result = _transcribe_audio(
+                    translation_model,
+                    audio,
+                    audio_path,
+                    len(results),
+                    index,
+                    batch_size,
+                    chunk_size,
+                    print_progress,
+                )
+            else:
+                translation_result = _transcribe_audio_live(
+                    translation_model,
+                    audio,
+                    audio_path,
+                    len(results),
+                    index,
+                    batch_size,
+                    chunk_size,
+                    print_progress,
+                    live_chunk_size_sec,
+                    live_chunk_overlap_sec,
+                    live_chunk_interval_sec,
+                )
 
             if translation_result is None:
                 print(f">> Translation failed for {audio_path}")
