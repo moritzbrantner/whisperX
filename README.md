@@ -131,6 +131,13 @@ To label the transcript with speaker ID's (set number of speakers if known e.g. 
 
     whisperx examples/sample01.wav --model large-v2 --diarize --highlight_words True
 
+To build persistent speaker profiles across files, save diarized voices from one run and reuse them later:
+
+    whisperx training_call.wav --diarize --hf_token $HF_TOKEN --save_speakers_dir ./speaker_profiles
+    whisperx new_call.wav --diarize --hf_token $HF_TOKEN --known_speakers_dir ./speaker_profiles
+
+You can also provide both flags together to keep updating the profile directory while matching known speakers.
+
 To run on CPU instead of GPU (and for running on Mac OS X):
 
     whisperx examples/sample01.wav --compute_type int8
