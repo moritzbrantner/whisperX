@@ -142,6 +142,12 @@ To run on CPU instead of GPU (and for running on Mac OS X):
 
     whisperx examples/sample01.wav --compute_type int8
 
+To simulate live audio ingestion from a file, split audio into overlapping chunks and feed them progressively:
+
+    whisperx examples/sample01.wav --live_chunk_size_sec 2.0 --live_chunk_overlap_sec 0.5 --live_chunk_interval_sec 0.1
+
+Use `--live_chunk_size_sec` to enable this mode. Overlap and inter-chunk delay are configurable with `--live_chunk_overlap_sec` and `--live_chunk_interval_sec`.
+
 ### Other languages
 
 The phoneme ASR alignment model is *language-specific*, for tested languages these models are [automatically picked from torchaudio pipelines or huggingface](https://github.com/m-bain/whisperX/blob/e909f2f766b23b2000f2d95df41f9b844ac53e49/whisperx/transcribe.py#L22).
