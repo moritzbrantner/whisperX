@@ -97,6 +97,39 @@ $ pip install -e .
 
 You may also need to install ffmpeg, rust etc. Follow openAI instructions here https://github.com/openai/whisper#setup.
 
+### Reusable idempotent setup steps (copy/paste-friendly)
+
+If you prefer a setup that can be re-run safely, use these steps:
+
+1. **Ensure required system tools are present** (re-running only installs missing packages).
+2. **Create the Conda environment only if it does not already exist.**
+3. **Activate the environment.**
+4. **Install/refresh dependencies with explicit versions.**
+5. **Install WhisperX in editable mode (safe to re-run).**
+
+```bash
+# 1) Create env only if missing
+if ! conda env list | awk '{print $1}' | grep -qx "whisperx"; then
+  conda create -y --name whisperx python=3.10
+fi
+
+# 2) Activate env
+conda activate whisperx
+
+# 3) Install/refresh pytorch stack for CUDA 11.8
+conda install -y pytorch==2.0.0 torchaudio==2.0.0 pytorch-cuda=11.8 -c pytorch -c nvidia
+
+# 4) Install/refresh whisperX from source
+if [ ! -d whisperX/.git ]; then
+  git clone https://github.com/m-bain/whisperX.git
+fi
+cd whisperX
+pip install -e .
+
+# 5) Optional: keep pip tooling current for repeatable installs
+python -m pip install --upgrade pip setuptools wheel
+```
+
 ### Speaker Diarization
 To **enable Speaker Diarization**, include your Hugging Face access token (read) that you can generate from [Here](https://huggingface.co/settings/tokens) after the `--hf_token` argument and accept the user agreement for the following models: [Segmentation](https://huggingface.co/pyannote/segmentation-3.0) and [Speaker-Diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) (if you choose to use Speaker-Diarization 2.x, follow requirements [here](https://huggingface.co/pyannote/speaker-diarization) instead.)
 
