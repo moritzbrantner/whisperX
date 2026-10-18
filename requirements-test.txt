@@ -1,0 +1,7 @@
+# Existing CPU regression tests; runtime requirements remain in requirements.txt.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.0.0+cpu
+numpy==1.26.4
+pandas==2.3.3
+configargparse==1.7.1
+pytest==8.4.2
