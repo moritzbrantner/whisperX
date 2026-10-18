@@ -346,3 +346,15 @@ If you use this in your research, please cite the paper:
   year={2023}
 }
 ```
+
+
+## Regression tests
+
+The existing regression tests run on CPU with test doubles at model boundaries. Use Python 3.10 and the separate test dependencies:
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m pytest -q
+```
+
+The `merge-ready` CI check runs this suite on every pull request.
